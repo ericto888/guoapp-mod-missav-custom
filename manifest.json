@@ -1,0 +1,29 @@
+{
+  "id": "missav-custom",
+  "name": "MissAV",
+  "version": "1.0.4",
+  "description": "MissAV 成人长视频站源，支持多镜像自动探测、中文分类、搜索、详情与 HLS 画质解析。",
+  "runtime": "js",
+  "api": 1,
+  "adult": true,
+  "hosts": [
+    "missav.fans",
+    "*.missav.fans",
+    "missav.media",
+    "*.missav.media",
+    "missav.ai",
+    "*.missav.ai",
+    "missav.ws",
+    "*.missav.ws",
+    "missav.live",
+    "*.missav.live",
+    "surrit.mrstcdn.store",
+    "*.mrstcdn.store",
+    "fourhoi.com",
+    "*.fourhoi.com"
+  ],
+  "capabilities": [
+    "search"
+  ],
+  "baseUrl": "https://missav.fans"
+}
