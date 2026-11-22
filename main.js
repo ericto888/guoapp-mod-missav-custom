@@ -338,25 +338,86 @@ function unpackPacker(script) {
 }
 
 function videoSource(html) {
-  const source = String(html || "").replace(/\\\//g, "/").replace(/\\u002[fF]/g, "/");
-  const scripts = source.match(/<script[^>]*>[\s\S]*?<\/script>/gi) || [];
-  const urlPattern = /https?:\/\/surrit\.[a-z0-9.-]+\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(?:playlist\.m3u8|(?:1080|720|480|360)p\/video\.m3u8)/i;
-  function parse(value) {
-    const found = String(value || "").match(urlPattern);
-    if (!found) return null;
-    const url = found[0];
-    const id = url.match(/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i);
-    if (!id) return null;
-    return { url: url, uuid: id[1].toLowerCase(), origin: originOf(url) };
-  }
-  for (const scriptTag of scripts) {
-    const script = scriptTag.replace(/^<script[^>]*>|<\/script>$/gi, "");
+  const raw = String(html || "")
+    .replace(/\\\//g, "/")
+    .replace(/\\u002f/gi, "/")
+    .replace(/&amp;/gi, "&");
+  const scripts = raw.match(/<script\b[^>]*>[\s\S]*?<\/script>/gi) || [];
+  const sources = [raw];
+  for (const tag of scripts) {
+    const script = tag.replace(/^<script\b[^>]*>|<\/script>$/gi, "");
+    sources.push(script);
     const unpacked = unpackPacker(script);
-    if (!unpacked) continue;
-    const found = parse(unpacked);
-    if (found) return found;
+    if (unpacked) sources.push(unpacked);
   }
-  return parse(source);
+
+  const uuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+  const compactUuidPattern = /[0-9a-f]{32}/i;
+  const hostPattern = "(?:surrit|nineyu|fourhoi)(?:\\.[a-z0-9.-]+)";
+  const fullUrlPattern = new RegExp(
+    "https?:\\\\/\\\\/" + hostPattern + "\\\\/" +
+    uuidPattern.source + "\\\\/(?:playlist\\\\.m3u8|(?:1080|720|480|360)p\\\\/video\\\\.m3u8)",
+    "i"
+  );
+
+  function formatUuid(value) {
+    const hex = String(value || "").replace(/-/g, "").toLowerCase();
+    if (!/^[0-9a-f]{32}$/.test(hex)) return "";
+    return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" +
+      hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+  }
+
+  function makeSource(uuid, origin, url) {
+    const id = formatUuid(uuid);
+    if (!id) return null;
+    const base = origin || "https://surrit.com";
+    return {
+      url: url || base + "/" + id + "/playlist.m3u8",
+      uuid: id,
+      origin: base
+    };
+  }
+
+  for (const text of sources) {
+    const direct = String(text).match(fullUrlPattern);
+    if (direct) {
+      const url = direct[0];
+      const id = url.match(uuidPattern);
+      if (id) return makeSource(id[0], originOf(url), url);
+    }
+
+    // Current page scripts often expose the UUID followed by /seek rather than a full URL.
+    const domainPath = String(text).match(new RegExp(
+      "(" + hostPattern + ")/(" + uuidPattern.source + ")/(?:seek|playlist\\\\.m3u8|)", "i"
+    ));
+    if (domainPath) {
+      const host = domainPath[1];
+      const protocolHost = "https://" + host;
+      return makeSource(domainPath[2], protocolHost);
+    }
+
+    // Some packed variants split the hostname and UUID into tokens; recover UUID around seek.
+    if (/seek/i.test(text)) {
+      const id = String(text).match(uuidPattern);
+      if (id) return makeSource(id[0], "https://surrit.com");
+      const seekAt = String(text).toLowerCase().indexOf("seek");
+      if (seekAt >= 32) {
+        const before = String(text).slice(Math.max(0, seekAt - 48), seekAt);
+        const compact = before.match(compactUuidPattern);
+        if (compact) return makeSource(compact[0], "https://surrit.com");
+      }
+    }
+
+    // Fallback: packed token sequences can contain the UUID as 32 hexadecimal characters.
+    const packed = String(text).match(/m3u8\|([a-f0-9|]{32,80})\|(?:com|store)\|(surrit|nineyu|fourhoi)\|https/i);
+    if (packed) {
+      const parts = packed[1].split("|").reverse();
+      const compact = parts.join("");
+      const uuid = formatUuid(compact);
+      if (uuid) return makeSource(uuid, "https://" + packed[2] + ".com");
+    }
+  }
+  return null;
 }
 function resolveUrl(base, relative) {
   try {
@@ -402,7 +463,7 @@ function probeStreams(source, site) {
   const referer = site + "/";
   const streamHeaders = { "User-Agent": UA, "Referer": referer, "Origin": site };
   const uuid = source.uuid;
-  const origins = Array.from(new Set([source.origin, VIDEO_HOST]));
+  const origins = Array.from(new Set([source.origin, "https://surrit.com", VIDEO_HOST]));
   const diagnostics = [];
   const variants = [];
 
