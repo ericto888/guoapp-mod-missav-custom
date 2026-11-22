@@ -337,21 +337,27 @@ function unpackPacker(script) {
   }).replace(/\\'/g, "'");
 }
 
-function videoUUID(html) {
+function videoSource(html) {
   const source = String(html || "").replace(/\\\//g, "/").replace(/\\u002[fF]/g, "/");
   const scripts = source.match(/<script[^>]*>[\s\S]*?<\/script>/gi) || [];
-  const uuidPattern = /https?:\/\/surrit\.[a-z0-9.]+\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i;
+  const urlPattern = /https?:\/\/surrit\.[a-z0-9.-]+\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(?:playlist\.m3u8|(?:1080|720|480|360)p\/video\.m3u8)/i;
+  function parse(value) {
+    const found = String(value || "").match(urlPattern);
+    if (!found) return null;
+    const url = found[0];
+    const id = url.match(/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i);
+    if (!id) return null;
+    return { url: url, uuid: id[1].toLowerCase(), origin: originOf(url) };
+  }
   for (const scriptTag of scripts) {
     const script = scriptTag.replace(/^<script[^>]*>|<\/script>$/gi, "");
     const unpacked = unpackPacker(script);
     if (!unpacked) continue;
-    const found = unpacked.match(uuidPattern);
-    if (found) return found[1].toLowerCase();
+    const found = parse(unpacked);
+    if (found) return found;
   }
-  const fallback = source.match(uuidPattern);
-  return fallback ? fallback[1].toLowerCase() : "";
+  return parse(source);
 }
-
 function resolveUrl(base, relative) {
   try {
     return host.resolveUrl(base, relative);
@@ -392,49 +398,78 @@ function playlistVariants(master, masterUrl, referer) {
   return variants;
 }
 
-function probeStreams(uuid, site) {
+function probeStreams(source, site) {
   const referer = site + "/";
   const streamHeaders = { "User-Agent": UA, "Referer": referer, "Origin": site };
-  const root = VIDEO_HOST + "/" + uuid;
-  const masterUrl = root + "/playlist.m3u8";
-  let master = "";
-  try {
-    const response = host.fetch({ method: "GET", url: masterUrl, headers: streamHeaders, timeoutMs: 10000 }) || {};
-    if (Number(response.status || 0) >= 200 && Number(response.status || 0) < 400 && validPlaylist(response.body)) {
-      master = str(response.body);
-    }
-  } catch (error) {}
+  const uuid = source.uuid;
+  const origins = Array.from(new Set([source.origin, VIDEO_HOST]));
+  const diagnostics = [];
+  const variants = [];
 
-  let variants = master ? playlistVariants(master, masterUrl, referer) : [];
-  const fixed = [1080, 720, 480, 360];
-  for (const height of fixed) {
-    const address = root + "/" + height + "p/video.m3u8";
-    if (variants.some(function (item) { return item.height === height; })) continue;
+  function inspect(address, timeoutMs, quality, height, isDirect) {
     try {
-      const response = host.fetch({ method: "GET", url: address, headers: streamHeaders, timeoutMs: 7000 }) || {};
-      if (Number(response.status || 0) >= 200 && Number(response.status || 0) < 400 && validPlaylist(response.body)) {
+      const response = host.fetch({
+        method: "GET",
+        url: address,
+        headers: streamHeaders,
+        timeoutMs: timeoutMs
+      }) || {};
+      const status = Number(response.status || 0);
+      const body = str(response.body);
+      const headers = response.headers || {};
+      let contentType = "";
+      Object.keys(headers).some(function (key) {
+        if (key.toLowerCase() === "content-type") {
+          contentType = str(headers[key]);
+          return true;
+        }
+        return false;
+      });
+      if (status >= 200 && status < 400 && validPlaylist(body)) {
         variants.push({
           url: address,
-          quality: height + "P",
+          quality: quality,
           height: height,
           referer: referer,
           headers: streamHeaders
         });
+        diagnostics.push(address.replace(/^https?:\/\//, "").split("/").slice(0, 2).join("/") +
+          " HTTP " + status + " " + (contentType || "content-type?") + " HLS有效");
+        return true;
       }
-    } catch (error) {}
+      const preview = body.replace(/\s+/g, " ").slice(0, 100)
+        .replace(/(cookie|token|authorization|sign|signature)=([^&\s]+)/ig, "$1=[redacted]");
+      diagnostics.push(address.replace(/^https?:\/\//, "").split("/").slice(0, 2).join("/") +
+        " HTTP " + status + " " + (contentType || "content-type?") +
+        (preview ? " body=" + preview : "") + (isDirect ? " [页面原始地址]" : ""));
+    } catch (error) {
+      diagnostics.push(address.replace(/^https?:\/\//, "").split("/").slice(0, 2).join("/") +
+        " fetch-error=" + str(error && error.message || error).slice(0, 100));
+    }
+    return false;
   }
+
+  // 优先请求页面脚本实际提供的完整 URL，不丢弃 CDN hostname。
+  if (source.url) inspect(source.url, 10000, "自动", 0, true);
+
+  const paths = [
+    { path: "/" + uuid + "/playlist.m3u8", quality: "自动", height: 0 },
+    { path: "/" + uuid + "/1080p/video.m3u8", quality: "1080P", height: 1080 },
+    { path: "/" + uuid + "/720p/video.m3u8", quality: "720P", height: 720 },
+    { path: "/" + uuid + "/480p/video.m3u8", quality: "480P", height: 480 },
+    { path: "/" + uuid + "/360p/video.m3u8", quality: "360P", height: 360 }
+  ];
+  for (const origin of origins) {
+    for (const candidate of paths) {
+      const address = origin + candidate.path;
+      if (variants.some(function (item) { return item.url === address; })) continue;
+      inspect(address, 7000, candidate.quality, candidate.height, false);
+    }
+  }
+
   variants.sort(function (a, b) { return (b.height || 0) - (a.height || 0); });
-  if (master) {
-    variants.push({
-      url: masterUrl,
-      quality: "自动",
-      height: 0,
-      referer: referer,
-      headers: streamHeaders
-    });
-  }
   if (!variants.length) {
-    throw new Error("MissAV 视频 CDN 无可用 HLS 清单（" + VIDEO_HOST.replace("https://", "") + "）");
+    throw new Error("MissAV 视频 CDN 无可用 HLS 清单；探测结果：" + diagnostics.slice(0, 12).join("；"));
   }
   return {
     url: variants[0].url,
@@ -443,7 +478,6 @@ function probeStreams(uuid, site) {
     variants: variants
   };
 }
-
 function sourceIdFromTask(task) {
   const drama = str(task && task.dramaId);
   const chapter = str(task && task.chapter && task.chapter.id);
@@ -506,9 +540,9 @@ module.exports = {
     const savedPage = str(task && task.chapter && task.chapter.pageUrl);
     const path = pathFromUrl(savedPage, "/cn/" + id);
     const result = getPage(path, savedPage || "");
-    const uuid = videoUUID(result.body);
-    if (!uuid) throw new Error("MissAV 页面没有找到视频 UUID，播放器脚本结构可能已变化");
-    const media = probeStreams(uuid, originOf(result.url));
+    const source = videoSource(result.body);
+    if (!source) throw new Error("MissAV 页面没有找到 surrit 播放地址，播放器脚本结构可能已变化");
+    const media = probeStreams(source, originOf(result.url));
     return host.finishMedia(media);
   }
 };
